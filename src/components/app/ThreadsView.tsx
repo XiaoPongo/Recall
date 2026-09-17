@@ -58,7 +58,7 @@ export function ThreadsView({ fragments, threads }: { fragments: Fragment[]; thr
     <div className="space-y-3">
       <div className="flex items-center gap-2 px-1">
         <Layers className="h-4 w-4 text-primary" />
-        <h2 className="text-sm font-semibold">Threads</h2>
+        <h2 className="font-display text-lg font-semibold tracking-tight">Threads</h2>
         <span className="text-xs text-muted-foreground">grouped automatically</span>
       </div>
 
@@ -68,11 +68,11 @@ export function ThreadsView({ fragments, threads }: { fragments: Fragment[]; thr
         return (
           <section
             key={t.id}
-            className="overflow-hidden rounded-2xl border bg-card shadow-sm"
+            className="overflow-hidden rounded-3xl border bg-card shadow-sm"
             aria-label={t.title}
           >
             <button className="flex w-full items-start gap-3 p-4 text-left" onClick={() => toggle(t.id)}>
-              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                 <Layers className="h-4 w-4" />
               </div>
               <div className="min-w-0 flex-1">

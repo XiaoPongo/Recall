@@ -51,7 +51,8 @@ export function TodayView({ fragments }: { fragments: Fragment[] }) {
     <div className="space-y-5">
       <div className="flex items-center gap-2 px-1">
         <CalendarDays className="h-4 w-4 text-primary" />
-        <h2 className="text-sm font-semibold">Agenda — detected from your saves</h2>
+        <h2 className="font-display text-lg font-semibold tracking-tight">Today &amp; this week</h2>
+        <span className="text-xs text-muted-foreground">detected from your saves</span>
       </div>
 
       {!hasAny && (
@@ -79,9 +80,9 @@ export function TodayView({ fragments }: { fragments: Fragment[] }) {
                 <button
                   key={f.id}
                   onClick={() => openFragment(f.id)}
-                  className="flex w-full items-center gap-3 rounded-xl border bg-card p-3 text-left shadow-sm transition-colors hover:border-primary/30"
+                  className="flex w-full items-center gap-3 rounded-2xl border bg-card p-3 text-left shadow-sm transition-colors hover:border-primary/30"
                 >
-                  <div className="flex w-14 shrink-0 flex-col items-center rounded-lg bg-muted/60 py-1.5">
+                  <div className="flex w-14 shrink-0 flex-col items-center rounded-xl bg-primary/10 py-1.5">
                     <span className="text-[10px] font-medium uppercase text-muted-foreground">
                       {format(new Date(time), 'MMM')}
                     </span>

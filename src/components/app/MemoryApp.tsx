@@ -3,11 +3,11 @@
 /**
  * Recall — app shell.
  * Single-page, client-side; all state is local (IndexedDB + zustand).
+ * Mobile-first: bottom nav + lens chips. Desktop (lg+): sidebar.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { CalendarDays, Inbox, Layers, Loader2, Search } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Loader2, Search, SearchX, Sparkles } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/hooks/use-toast'
 import { db, getSettings, ingestPendingShares, shareInbox } from '@/lib/db'
@@ -21,7 +21,8 @@ import { show } from '@/lib/notify'
 import { extractSnippet } from '@/lib/search/search'
 import { AppHeader } from './AppHeader'
 import { SearchBar } from './SearchBar'
-import { TypeDrawer } from './TypeDrawer'
+import { Sidebar } from './Sidebar'
+import { BottomNav } from './BottomNav'
 import { InboxView } from './InboxView'
 import { TodayView } from './TodayView'
 import { ThreadsView } from './ThreadsView'
@@ -31,7 +32,6 @@ import { SettingsView } from './SettingsView'
 import { SetupWizard } from './SetupWizard'
 import { VoiceRecorder } from './VoiceRecorder'
 import { EmptyState } from './bits'
-import { cn } from '@/lib/utils'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
@@ -117,8 +117,8 @@ export function MemoryApp() {
     if (!settings) return
     const q = ui.query.trim()
     if (!q) {
-      if (ui.view === 'search') ui.setView('inbox')
       ui.setSearch(null)
+      ui.setSearching(false)
       return
     }
     ui.setSearching(true)
@@ -156,7 +156,7 @@ export function MemoryApp() {
 
   return (
     <div className="flex min-h-dvh bg-background">
-      <TypeDrawer fragments={fragments} />
+      <Sidebar fragments={fragments} />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <AppHeader
@@ -169,51 +169,71 @@ export function MemoryApp() {
         />
         <SearchBar semanticReady={settings.packs.semantic === 'ready'} />
 
-        <main className="mx-auto w-full max-w-3xl flex-1 px-3 pb-28 pt-4 sm:px-5 lg:pb-10" id="main">
+        <main className="mx-auto w-full max-w-3xl flex-1 px-3 pb-36 pt-4 sm:px-5 lg:pb-12" id="main">
           {ui.view === 'inbox' && <InboxView fragments={fragments} threads={threads} settings={settings} />}
           {ui.view === 'today' && <TodayView fragments={fragments} />}
           {ui.view === 'threads' && <ThreadsView fragments={fragments} threads={threads} />}
-          {ui.view === 'search' && <SearchResultsView />}
+          {ui.view === 'search' && (ui.query.trim() ? <SearchResultsView /> : <SearchIdleView />)}
         </main>
 
         {/* mobile bottom nav */}
-        <nav className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 backdrop-blur-md lg:hidden" aria-label="Primary">
-          <div className="mx-auto grid max-w-md grid-cols-3">
-            {(
-              [
-                ['inbox', 'Inbox', <Inbox className="h-5 w-5" key="i" />],
-                ['today', 'Today', <CalendarDays className="h-5 w-5" key="t" />],
-                ['threads', 'Threads', <Layers className="h-5 w-5" key="th" />],
-              ] as Array<[typeof ui.view, string, React.ReactNode]>
-            ).map(([id, label, icon]) => (
-              <button
-                key={id}
-                onClick={() => {
-                  ui.setQuery('')
-                  ui.setView(id)
-                }}
-                className={cn(
-                  'flex flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium transition-colors',
-                  ui.view === id ? 'text-primary' : 'text-muted-foreground'
-                )}
-                aria-current={ui.view === id ? 'page' : undefined}
-              >
-                {icon}
-                {label}
-              </button>
-            ))}
-          </div>
-          {processingCount > 0 && (
-            <div className="flex items-center justify-center gap-1.5 border-t bg-muted/40 py-1 text-[10px] text-muted-foreground">
-              <Loader2 className="h-3 w-3 animate-spin" /> processing {processingCount} fragment{processingCount === 1 ? '' : 's'} on-device
-            </div>
-          )}
-        </nav>
+        <BottomNav processingCount={processingCount} />
       </div>
 
       <FragmentDetail fragments={fragments} threads={threads} />
       <VoiceRecorder voicePackReady={settings.packs.voice === 'ready'} />
-      {ui.settingsOpen && <SettingsView settings={settings} onDone={() => { ui.setSettingsOpen(false); void refreshSettings() }} />}
+      {ui.settingsOpen && (
+        <SettingsView
+          settings={settings}
+          onDone={() => {
+            ui.setSettingsOpen(false)
+            void refreshSettings()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** friendly landing when the Search tab is opened with an empty query */
+function SearchIdleView() {
+  const setQuery = useUI((s) => s.setQuery)
+
+  const EXAMPLES = [
+    'that laptop fixing article',
+    'when I saved the Tokyo stuff',
+    'deadlines this week',
+    'the recipe with lentils',
+    'voice notes about the move',
+  ]
+
+  return (
+    <div className="space-y-4">
+      <EmptyState
+        icon={<Search className="h-10 w-10" />}
+        title="What are you looking for?"
+        body="Describe it loosely — by meaning, by keywords, or by when you saved it. Search combines all three, so exact wording doesn't matter."
+      />
+      <div className="space-y-2 rounded-3xl border bg-card p-4 shadow-sm">
+        <p className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+          <Sparkles className="h-3.5 w-3.5 text-primary" /> Try something like
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {EXAMPLES.map((ex) => (
+            <button
+              key={ex}
+              onClick={() => setQuery(ex)}
+              className="rounded-full border border-primary/25 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+            >
+              {ex}
+            </button>
+          ))}
+        </div>
+        <p className="pt-1 text-[11px] leading-relaxed text-muted-foreground">
+          Tip: press <kbd className="rounded border bg-muted px-1 font-sans text-[10px]">/</kbd> anywhere to jump into
+          search. Time phrases like “last week” become filters automatically.
+        </p>
+      </div>
     </div>
   )
 }
@@ -224,17 +244,17 @@ function SearchResultsView() {
   if (searching && !searchHits) {
     return (
       <div className="space-y-2.5">
-        <Skeleton className="h-24 w-full rounded-2xl" />
-        <Skeleton className="h-24 w-full rounded-2xl" />
-        <Skeleton className="h-24 w-full rounded-2xl" />
+        <Skeleton className="h-24 w-full rounded-3xl" />
+        <Skeleton className="h-24 w-full rounded-3xl" />
+        <Skeleton className="h-24 w-full rounded-3xl" />
       </div>
     )
   }
   if (!searchHits || searchHits.length === 0) {
     return (
       <EmptyState
-        icon={<Search className="h-10 w-10" />}
-        title="No matches"
+        icon={<SearchX className="h-10 w-10" />}
+        title="No matches — yet"
         body={`Nothing matches “${query}”. Try fewer words, or check the time filter — hybrid search combines meaning and keywords, so spelling doesn't need to be exact.`}
       />
     )

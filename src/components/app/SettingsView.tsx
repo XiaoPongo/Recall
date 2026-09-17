@@ -6,7 +6,7 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  Brain, CalendarHeart, Download, HardDrive, Info, Package, RotateCw, ShieldCheck, Smartphone, Trash2, X,
+  Brain, CalendarHeart, Download, HardDrive, Info, Monitor, Moon, Package, Palette, RotateCw, ShieldCheck, Smartphone, Sun, Trash2, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -23,9 +23,10 @@ import { computeStorageReport, downloadBlob, dropTranscribedAudio, exportAllData
 import { deleteAllData } from '@/lib/capture'
 import { fmtBytes } from '@/lib/format'
 import { notificationPermission, notificationsSupported, requestNotificationPermission } from '@/lib/notify'
+import { useTheme, type ThemePref } from '@/lib/theme'
 import { cn } from '@/lib/utils'
 
-type Tab = 'intelligence' | 'privacy' | 'storage' | 'data'
+type Tab = 'appearance' | 'intelligence' | 'privacy' | 'storage' | 'data'
 
 export function SettingsView({ settings, onDone }: { settings: AppSettings; onDone: () => void }) {
   const [tab, setTab] = useState<Tab>('intelligence')
@@ -33,18 +34,19 @@ export function SettingsView({ settings, onDone }: { settings: AppSettings; onDo
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
       <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
-        <h2 className="font-semibold">Settings</h2>
+        <h2 className="font-display text-lg font-semibold">Settings</h2>
         <span className="rounded-full border border-emerald-600/25 bg-emerald-600/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
           everything stays on this device
         </span>
-        <Button variant="ghost" size="icon" className="ml-auto" onClick={onDone} aria-label="Close settings">
+        <Button variant="ghost" size="icon" className="ml-auto rounded-full" onClick={onDone} aria-label="Close settings">
           <X className="h-5 w-5" />
         </Button>
       </header>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <nav className="flex shrink-0 gap-1 overflow-x-auto border-b p-2 scroll-slim sm:w-48 sm:flex-col sm:border-b-0 sm:border-r sm:p-3">
+        <nav className="flex shrink-0 gap-1 overflow-x-auto border-b p-2 scroll-none sm:w-48 sm:flex-col sm:border-b-0 sm:border-r sm:p-3">
           {(
             [
+              ['appearance', 'Appearance', <Palette className="h-4 w-4" key="a" />],
               ['intelligence', 'Intelligence', <Brain className="h-4 w-4" key="b" />],
               ['privacy', 'Privacy', <ShieldCheck className="h-4 w-4" key="p" />],
               ['storage', 'Storage', <HardDrive className="h-4 w-4" key="s" />],
@@ -64,12 +66,64 @@ export function SettingsView({ settings, onDone }: { settings: AppSettings; onDo
           ))}
         </nav>
         <div className="min-h-0 flex-1 overflow-y-auto scroll-slim p-4 sm:p-6">
+          {tab === 'appearance' && <AppearanceTab />}
           {tab === 'intelligence' && <IntelligenceTab settings={settings} />}
           {tab === 'privacy' && <PrivacyTab settings={settings} />}
           {tab === 'storage' && <StorageTab />}
           {tab === 'data' && <DataTab />}
         </div>
       </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+
+function AppearanceTab() {
+  const { pref, setPref } = useTheme()
+
+  const OPTIONS: Array<{ id: ThemePref; label: string; icon: React.ReactNode; hint: string }> = [
+    { id: 'system', label: 'System', icon: <Monitor className="h-4 w-4" />, hint: 'Follows your device setting' },
+    { id: 'light', label: 'Light', icon: <Sun className="h-4 w-4" />, hint: 'Warm ivory' },
+    { id: 'dark', label: 'Dark', icon: <Moon className="h-4 w-4" />, hint: 'Warm espresso' },
+  ]
+
+  return (
+    <div className="mx-auto max-w-xl space-y-4">
+      <SectionTitle
+        title="Appearance"
+        body="Recall follows your system theme by default. Pick a preference here to override it — it applies instantly, everywhere."
+      />
+      <div
+        role="radiogroup"
+        aria-label="Theme"
+        className="grid grid-cols-3 gap-2 rounded-2xl border bg-card p-2 shadow-sm"
+      >
+        {OPTIONS.map((o) => {
+          const active = pref === o.id
+          return (
+            <button
+              key={o.id}
+              role="radio"
+              aria-checked={active}
+              onClick={() => setPref(o.id)}
+              className={cn(
+                'flex min-h-[72px] flex-col items-center justify-center gap-1 rounded-xl border transition-colors',
+                active
+                  ? 'border-primary/40 bg-primary/10 text-primary'
+                  : 'border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+              )}
+            >
+              {o.icon}
+              <span className="text-xs font-semibold">{o.label}</span>
+              <span className="text-[10px] opacity-70">{o.hint}</span>
+            </button>
+          )
+        })}
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        Your choice is stored on this device only. The quick toggle in the top bar cycles through the same options.
+      </p>
     </div>
   )
 }
@@ -523,7 +577,7 @@ function settings_packs_preserve() {
 function SectionTitle({ title, body }: { title: string; body: string }) {
   return (
     <div>
-      <h3 className="font-semibold">{title}</h3>
+      <h3 className="font-display text-base font-semibold tracking-tight">{title}</h3>
       <p className="text-sm leading-relaxed text-muted-foreground">{body}</p>
     </div>
   )

@@ -175,8 +175,8 @@ function FragmentDetailInner({
 
         {/* duplicates */}
         {f.duplicateOf && (
-          <div className="flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 text-sm">
-            <CopyIcon className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+          <div className="flex items-center gap-2 rounded-2xl border border-primary/25 bg-primary/10 p-3 text-sm">
+            <CopyIcon className="h-4 w-4 text-primary" />
             <span className="flex-1">
               Possibly saved before
               {dupOriginal && (
@@ -205,7 +205,7 @@ function FragmentDetailInner({
 
         {/* what the pipeline extracted — always confidence-labeled */}
         {(f.extracted.dates.length > 0 || f.extracted.urgency.level !== 'none' || f.extracted.category) && (
-          <div className="space-y-2 rounded-xl border p-3">
+          <div className="space-y-2 rounded-2xl border p-3.5">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
               <Sparkles className="h-3.5 w-3.5" /> Extracted on this device
             </div>
@@ -242,7 +242,7 @@ function FragmentDetailInner({
         )}
 
         {/* WHY DID I SAVE THIS? */}
-        <div className="space-y-2 rounded-xl border border-primary/25 bg-accent/30 p-3">
+        <div className="space-y-2 rounded-2xl border border-primary/25 bg-accent/40 p-3.5">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-foreground">
             <Eye className="h-3.5 w-3.5" /> Why did I save this?
           </div>

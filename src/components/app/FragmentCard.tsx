@@ -48,14 +48,14 @@ export function FragmentCard({
 
   return (
     <article
-      className="group cursor-pointer rounded-2xl border bg-card p-3.5 shadow-sm transition-all hover:shadow-md hover:border-primary/30"
+      className="group cursor-pointer rounded-3xl border bg-card p-3.5 shadow-sm transition-all hover:shadow-md hover:border-primary/30"
       onClick={() => openFragment(fragment.id)}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => e.key === 'Enter' && openFragment(fragment.id)}
     >
       <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
           <TypeIcon type={fragment.type} />
         </div>
         <div className="min-w-0 flex-1">
@@ -112,7 +112,7 @@ export function FragmentCard({
             <UrgencyDot level={fragment.extracted.urgency.level} />
             <DeadlineChip fragment={fragment} />
             {fragment.duplicateOf && (
-              <Badge variant="outline" className="h-5 border-amber-500/40 bg-amber-500/10 px-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+              <Badge variant="outline" className="h-5 border-primary/30 bg-primary/10 px-1.5 text-[11px] font-medium text-primary">
                 <Copy className="mr-1 h-3 w-3" /> saved before
               </Badge>
             )}

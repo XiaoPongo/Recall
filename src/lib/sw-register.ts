@@ -18,7 +18,8 @@ export function registerSW(): void {
   }
   const register = () => {
     navigator.serviceWorker
-      .register('/sw.js', { scope: '/' })
+      // relative paths — works at the root AND under a GitHub Pages subpath
+      .register('sw.js', { scope: './' })
       .then(async (reg) => {
         // check for updates periodically while open
         setInterval(() => void reg.update().catch(() => {}), 60 * 60 * 1000)

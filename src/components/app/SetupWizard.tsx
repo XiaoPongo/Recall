@@ -71,16 +71,16 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         className="w-full max-w-lg"
       >
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <RippleMark className="h-16 w-16 rounded-2xl shadow-lg shadow-amber-900/20" />
+          <RippleMark className="h-16 w-16 rounded-3xl shadow-xl shadow-primary/25" />
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Recall</h1>
+            <h1 className="font-display text-3xl font-semibold tracking-tight">Recall</h1>
             <p className="text-sm text-muted-foreground">Your private, offline second memory</p>
           </div>
           <LocalBadge />
         </div>
 
         {phase === 'welcome' && (
-          <div className="space-y-5 rounded-2xl border bg-card p-6 shadow-sm">
+          <div className="space-y-5 rounded-3xl border bg-card p-6 shadow-lg shadow-primary/5">
             <div className="space-y-3">
               {[
                 { icon: <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />, t: 'Nothing is uploaded', d: 'No account, no cloud, no tracking. All processing runs on this device.' },
@@ -103,9 +103,9 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         )}
 
         {phase === 'picks' && (
-          <div className="space-y-4 rounded-2xl border bg-card p-6 shadow-sm">
+          <div className="space-y-4 rounded-3xl border bg-card p-6 shadow-lg shadow-primary/5">
             <div>
-              <h2 className="font-semibold">Local intelligence</h2>
+              <h2 className="font-display text-lg font-semibold">Local intelligence</h2>
               <p className="text-sm text-muted-foreground">
                 Downloads once (~{totalMB} MB), then everything runs offline on this device.
               </p>
@@ -149,9 +149,9 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         )}
 
         {phase === 'download' && (
-          <div className="space-y-4 rounded-2xl border bg-card p-6 shadow-sm">
+          <div className="space-y-4 rounded-3xl border bg-card p-6 shadow-lg shadow-primary/5">
             <div>
-              <h2 className="font-semibold">Setting up your private memory…</h2>
+              <h2 className="font-display text-lg font-semibold">Setting up your private memory…</h2>
               <p className="text-sm text-muted-foreground">Downloading local intelligence — nothing is uploaded.</p>
             </div>
             {chosen.map((p) => {
@@ -178,11 +178,11 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         )}
 
         {phase === 'done' && (
-          <div className="space-y-4 rounded-2xl border bg-card p-6 shadow-sm">
+          <div className="space-y-4 rounded-3xl border bg-card p-6 shadow-lg shadow-primary/5">
             <div className="flex items-center gap-3">
               <CheckCircle2 className="h-8 w-8 text-emerald-600 dark:text-emerald-400" />
               <div>
-                <h2 className="font-semibold">{anySucceeded ? 'Ready — everything stays on this device.' : 'Ready (Basic mode).'}</h2>
+                <h2 className="font-display text-lg font-semibold">{anySucceeded ? 'Ready — everything stays on this device.' : 'Ready (Basic mode).'}</h2>
                 <p className="text-sm text-muted-foreground">
                   {anySucceeded
                     ? 'Capture anything. Search with plain language. Nothing to organize.'

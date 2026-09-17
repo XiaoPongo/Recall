@@ -1,4 +1,4 @@
-// Generates PWA icons for Recall from an inline SVG mark (amber "ripple" glyph)
+// Generates PWA icons for Recall from an inline SVG mark (coral "ripple" glyph)
 import sharp from 'sharp'
 import { mkdirSync } from 'fs'
 
@@ -12,13 +12,13 @@ function rippleSvg({ rounded = true, pad = 0 } = {}) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 512 512">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#d97706"/>
-      <stop offset="1" stop-color="#92400e"/>
+      <stop offset="0" stop-color="#ff9266"/>
+      <stop offset="1" stop-color="#cc3d1e"/>
     </linearGradient>
   </defs>
   <rect width="512" height="512" rx="${rx}" fill="url(#bg)"/>
   <g transform="translate(256 256) scale(${s}) translate(-256 -256)"
-     stroke="#fffbeb" stroke-width="30" stroke-linecap="round" fill="none">
+     stroke="#fff6ee" stroke-width="30" stroke-linecap="round" fill="none">
     <circle cx="256" cy="256" r="46"/>
     <path d="M 256 128 a 128 128 0 0 1 128 128" opacity="0.92"/>
     <path d="M 256 384 a 128 128 0 0 1 -128 -128" opacity="0.92"/>

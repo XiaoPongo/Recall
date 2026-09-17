@@ -1,5 +1,5 @@
 /*
- * Recall — service worker.
+ * Recall — service worker (subpath-safe: works at / and /<repo>/).
  * - Offline app shell (network-first navigation, cache-first statics)
  * - Runtime caching for intelligence-pack CDN files so models work offline
  * - Web Share Target: receives shared text/links/files from other apps,
@@ -9,12 +9,20 @@
  * static server + plugins (App / LocalNotifications / Filesystem). The
  * share inbox DB contract below is stable and can be reused as-is.
  */
-const VERSION = 'v3'
+const VERSION = 'v4'
 const STATIC_CACHE = `recall-static-${VERSION}`
 const MODEL_CACHE = 'recall-models-v1'
 const NAV_CACHE = `recall-nav-${VERSION}`
 
-const PRECACHE = ['/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/maskable-512.png']
+/* All paths are resolved against the registration scope, so the worker
+ * behaves identically at https://x.dev/ and https://user.github.io/repo/. */
+const SCOPE_URL = new URL(self.registration.scope)
+const SCOPE_PATH = SCOPE_URL.pathname // always ends with '/'
+function asset(path) {
+  return new URL(path, SCOPE_URL).toString()
+}
+
+const PRECACHE = ['manifest.json', 'favicon.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png']
 
 const MODEL_HOSTS = [
   'cdn.jsdelivr.net',
@@ -32,7 +40,7 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(STATIC_CACHE)
-      .then((c) => c.addAll(PRECACHE).catch(() => {}))
+      .then((c) => c.addAll(PRECACHE.map((p) => asset(p))).catch(() => {}))
       .then(() => self.skipWaiting())
   )
 })
@@ -74,7 +82,12 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return
 
   // immutable build assets + icons — cache-first
-  if (url.pathname.startsWith('/_next/static') || url.pathname.startsWith('/icons') || url.pathname === '/favicon.png' || url.pathname === '/manifest.json') {
+  if (
+    url.pathname.startsWith(SCOPE_PATH + '_next/static') ||
+    url.pathname.startsWith(SCOPE_PATH + 'icons') ||
+    url.pathname === SCOPE_PATH + 'favicon.png' ||
+    url.pathname === SCOPE_PATH + 'manifest.json'
+  ) {
     event.respondWith(cacheFirst(req, STATIC_CACHE))
     return
   }
@@ -107,10 +120,12 @@ async function networkFirstNav(req) {
   const cache = await caches.open(NAV_CACHE)
   try {
     const res = await fetch(req)
-    if (res && res.ok) cache.put('/', res.clone()).catch(() => {})
+    if (res && res.ok) cache.put(asset('./'), res.clone()).catch(() => {})
     return res
   } catch (e) {
-    const cached = (await cache.match(req)) || (await cache.match('/'))
+    const cached =
+      (await cache.match(req, { ignoreSearch: true })) ||
+      (await cache.match(asset('./'), { ignoreSearch: true }))
     if (cached) return cached
     return new Response('<h1>Offline</h1><p>Recall needs one online load to install its offline shell.</p>', {
       headers: { 'Content-Type': 'text/html' },
@@ -128,7 +143,7 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'POST') return
   const url = new URL(req.url)
   if (url.origin !== self.location.origin) return
-  if (!(url.searchParams.has('share') || url.pathname === '/share')) return
+  if (!(url.pathname.endsWith('/share-target') || url.searchParams.has('share'))) return
   event.respondWith(handleShare(req))
 })
 
@@ -158,7 +173,7 @@ async function handleShare(req) {
   } catch (e) {
     console.error('[sw] share handling failed', e)
   }
-  return Response.redirect(new URL('/?from=share', self.location.origin).toString(), 303)
+  return Response.redirect(new URL('?from=share', self.registration.scope).toString(), 303)
 }
 
 function str(v) {
@@ -215,7 +230,7 @@ self.addEventListener('notificationclick', (event) => {
       for (const client of clientList) {
         if ('focus' in client) return client.focus()
       }
-      if (self.clients.openWindow) await self.clients.openWindow('/')
+      if (self.clients.openWindow) await self.clients.openWindow('./')
     })()
   )
 })

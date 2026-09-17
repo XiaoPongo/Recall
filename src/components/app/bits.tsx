@@ -2,6 +2,8 @@
 
 /**
  * Shared presentational bits — brand mark, badges, chips.
+ * Tone: calm and human. Confidence is always hedged, never alarmist
+ * (soft pills, friendly wording) unless something is genuinely urgent.
  */
 import { AudioLines, FileText, Image as ImageIcon, Link2, Loader2, ShieldCheck, StickyNote } from 'lucide-react'
 import type { Confidence, FragmentType, UrgencyLevel } from '@/lib/types'
@@ -12,12 +14,12 @@ export function RippleMark({ className }: { className?: string }) {
     <svg viewBox="0 0 512 512" className={className} aria-hidden="true">
       <defs>
         <linearGradient id="rm" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#f59e0b" />
-          <stop offset="1" stopColor="#92400e" />
+          <stop offset="0" stopColor="#ff9266" />
+          <stop offset="1" stopColor="#cc3d1e" />
         </linearGradient>
       </defs>
       <rect width="512" height="512" rx="120" fill="url(#rm)" />
-      <g stroke="#fffbeb" strokeWidth="30" strokeLinecap="round" fill="none">
+      <g stroke="#fff6ee" strokeWidth="30" strokeLinecap="round" fill="none">
         <circle cx="256" cy="256" r="46" />
         <path d="M 256 128 a 128 128 0 0 1 128 128" opacity="0.92" />
         <path d="M 256 384 a 128 128 0 0 1 -128 -128" opacity="0.92" />
@@ -57,7 +59,7 @@ export function LocalBadge({ compact }: { compact?: boolean }) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full border border-emerald-600/25 bg-emerald-600/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-400',
+        'inline-flex items-center gap-1.5 rounded-full border border-emerald-600/25 bg-emerald-600/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-400',
         compact && 'px-1.5'
       )}
       title="All storage and processing happen on this device. Nothing is uploaded."
@@ -68,19 +70,32 @@ export function LocalBadge({ compact }: { compact?: boolean }) {
   )
 }
 
+/** soft, calm pill — never styled like a warning */
 export function ConfidenceChip({ kind, confidence }: { kind: string; confidence: Confidence }) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 text-[11px] font-medium',
-        confidence === 'high' && 'text-emerald-600 dark:text-emerald-400',
-        confidence === 'medium' && 'text-amber-600 dark:text-amber-400',
-        confidence === 'low' && 'text-stone-500 dark:text-stone-400'
+        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium',
+        confidence === 'high' &&
+          'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300',
+        confidence === 'medium' &&
+          'bg-amber-500/15 text-amber-700 dark:bg-amber-300/15 dark:text-amber-300',
+        confidence === 'low' &&
+          'bg-muted text-muted-foreground'
       )}
       title={`Inferred from local analysis — ${confidence} confidence`}
     >
+      <span
+        aria-hidden="true"
+        className={cn(
+          'h-1.5 w-1.5 rounded-full',
+          confidence === 'high' && 'bg-emerald-500 dark:bg-emerald-400',
+          confidence === 'medium' && 'bg-amber-500 dark:bg-amber-300',
+          confidence === 'low' && 'bg-muted-foreground/50'
+        )}
+      />
       {kind}
-      <span className="opacity-60">· {confidence} confidence</span>
+      <span className="opacity-70">· {confidence} confidence</span>
     </span>
   )
 }
@@ -91,11 +106,11 @@ export function UrgencyDot({ level }: { level: UrgencyLevel }) {
     <span
       className={cn(
         'inline-block h-2 w-2 rounded-full',
-        level === 'high' && 'bg-red-500',
-        level === 'medium' && 'bg-amber-500',
-        level === 'low' && 'bg-stone-400'
+        level === 'high' && 'bg-rose-500',
+        level === 'medium' && 'bg-amber-400',
+        level === 'low' && 'bg-stone-400 dark:bg-stone-500'
       )}
-      title={`Urgence: ${level}`}
+      title={`Urgency: ${level}`}
       aria-label={`urgency ${level}`}
     />
   )
@@ -112,17 +127,20 @@ export function ProcessingBadge({ status }: { status: 'raw' | 'processing' | 're
     )
   }
   return (
-    <span className="inline-flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400" title="Some processing steps failed — the fragment is still saved and searchable">
-      partially processed
+    <span
+      className="inline-flex items-center gap-1 rounded-full bg-amber-500/12 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-300/15 dark:text-amber-300"
+      title="Some processing steps failed — the fragment is still saved and searchable"
+    >
+      partly processed — still searchable
     </span>
   )
 }
 
 export function EmptyState({ icon, title, body, action }: { icon?: React.ReactNode; title: string; body: string; action?: React.ReactNode }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border px-6 py-12 text-center">
-      {icon && <div className="text-muted-foreground/60">{icon}</div>}
-      <div className="font-medium">{title}</div>
+    <div className="flex flex-col items-center justify-center gap-3 rounded-3xl border border-dashed border-border/90 bg-card/50 px-6 py-12 text-center">
+      {icon && <div className="text-primary/40">{icon}</div>}
+      <div className="font-display text-lg font-semibold tracking-tight">{title}</div>
       <p className="max-w-sm text-sm leading-relaxed text-muted-foreground">{body}</p>
       {action}
     </div>
