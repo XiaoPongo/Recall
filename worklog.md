@@ -62,3 +62,43 @@ Stage Summary:
 - V2 UI shipped: mobile-first bottom nav + desktop sidebar, dominant coral capture hero, light/dark/system themes, Fraunces + Nunito Sans personality, calm confidence/resurfacing UI, swipe-to-dismiss/snooze.
 - GitHub Pages shipped: fully static export, subpath-safe assets/manifest/SW, GitHub Actions workflow + manual deploy docs; verified offline at a /repo/ subpath.
 - All V1 functionality preserved (capture pipeline, hybrid search, threads, resurfacing, data controls); dev server healthy on port 3000.
+
+---
+Task ID: 3
+Agent: main (Super Z)
+Task: V3 fix — processing queue: move all processing off the main thread into Web Workers, replace strict FIFO with a priority-based queue (light text jobs before heavy model jobs regardless of arrival order), and run jobs for different fragments concurrently/independently.
+
+Work Log:
+- Read the entire existing pipeline (queue.ts serial runLoop on main thread with heavy steps sorting FIRST — exactly the reported bug), packs.ts (transformers/tesseract/pdf.js all loaded + run on the UI thread), threads/dedupe (main-thread compute + document.canvas hashing), search.ts (semantic query embed on main thread).
+- New: src/lib/workers/protocol.ts (lanes, op/payload/result types, HEAVY_STEPS = ocr/transcribe/extract-pdf/embed-semantic).
+- New: src/lib/workers/processing.worker.ts — module worker, stateless compute: dates/urgency/category (chrono-node), lexical + semantic embeddings, OCR (tesseract.js ESM from CDN), whisper transcription, pdf.js text extraction, dHash via OffscreenCanvas, dedupe-compare, thread-plan/thread-meta/related-scores, pack-download/pack-drop. Remote ESM loads use webpackIgnore/turbopackIgnore dynamic import; pack download progress forwarded via postMessage.
+- New: src/lib/workers/pool.ts — WorkerPool client: 2–4 workers (hardwareConcurrency-clamped), first heavyCap workers pinned for model singletons, affinity ('pinned'|'any'|'prefer-pinned'), crash rejection + budgeted respawn, park/wake slot management, pack-progress bridge, production warm-fetch of the worker URL (offline SW cache), embedQuery() fast lane for search with lexical-only fallback.
+- Rewrote pipeline/queue.ts: in-memory pending list with lanes + retry backoff; dispatchLoop always drains light lane first (heavy capped at pool.heavyCap); per-fragment mutex (one job per fragment at a time, cross-fragment concurrency); synchronous claim before first await (no double-dispatch race); prereq checks against an in-memory fragment index; EXECUTE map routes every step through worker ops (main thread = DB I/O + appliers); new 'embed-semantic' JobStep split out of 'embed' (lexical = light, semantic = heavy); getQueueStats() observability; enqueue/recover/requeueForPack/rebuildIndex APIs preserved (requeue/rebuild updated for the new step + multi-fragment addJobs helper).
+- Extracted pure cores: pipeline/dedupe-core.ts (normalizeUrl/hamming/dupeCheck + summary builders) and pipeline/threads-core.ts (sim/associatePlan/threadMeta/relatedScores) — shared by main thread and worker.
+- Refactored dedupe.ts + threads.ts: prepare summaries from Dexie → worker computes → main applies (create/join/merge-join plans, thread meta, related neighbors); relatedContext keeps its public shape for FragmentDetail.
+- Slimmed ml/packs.ts: downloadPack() now routes through pool.exec('pack-download', affinity pinned) — models download INSIDE the worker; clearPackCaches() adds pool.exec('pack-drop') before cache/IDB cleanup; removed all main-thread model code.
+- search.ts: query embeddings via pool.embedQuery (worker fast lane, prefers a pinned worker that already holds MiniLM); anchor vector stays inline (µs hash, documented).
+- UI: new QueueSheet.tsx (calm drawer — running jobs with lane chips + durations, quick/heavy lane waiting counts, recent completions with honest failure notes); BottomNav strip + AppHeader button open it; store gained queueSheetOpen; Settings Intelligence copy explains workers.
+- types.ts: JobStep += 'embed-semantic'; Job += lane + startedAt (indexes unchanged — no DB migration).
+- Bugs found & fixed during verification:
+  1) tesseract/pdf.js nested workers cannot be constructed from cross-origin CDN URLs ("Failed to construct 'Worker' … cannot be accessed from origin") — fixed by fetching the worker script once (SW-cached) and re-serving it from a same-origin blob URL (sameOriginWorkerUrl()); applied to both tesseract workerPath and pdf.js GlobalWorkerOptions.workerSrc.
+  2) The service worker's cache-first rule for /_next/static froze stale dev chunks (stable dev chunk names) so code edits never reached the browser — registerSW() now runs only in production builds; unregistered SW + cleared caches in the test browser; sw.js VERSION bumped v4→v5.
+  3) enqueueFragmentJobs/addJobs multi-fragment signature mismatch + a leftover placeholder line in requeueForPack — cleaned up; TS narrowing fix in threads.ts plan handling.
+- eslint.config.mjs ignores .next-pages (Task 2 export artifacts polluted lint).
+
+Verification (agent-browser, dev + static export):
+- Dev: seed 19 fragments — all processed through workers (19 lexical embeddings, 14 thread assignments, dates/urgency), queue drains to 0, zero console/page errors.
+- Semantic pack (~23 MB transformers.js) downloaded INSIDE the worker ("ready"); embed-semantic jobs then complete per fragment.
+- Vision pack: real tesseract OCR in the worker on generated text-bearing PNGs — full text extracted ("Product review meeting Friday 3pm / Slides due by Thursday noon …"), downstream dates ("Friday 3pm"→Fri 15:00, "Thursday noon") + urgency high extracted from OCR'd text; duplicate images flagged via dHash ("saved before").
+- PRIORITY PROOF (job-level polling at 350ms): image captured first → `ocr:running/heavy` while the text note's light jobs queue; note reaches `ready` while the image is still `processing` (its heavy embed-semantic still pending) — light beats heavy regardless of arrival order; concurrent interleaving across the pool with per-fragment ordering intact.
+- QueueSheet mid-race: "2 background workers", quick lane "6 waiting · always first", heavy lane "2 waiting · 1 at a time", running job with lane chip (screenshot: download/queue-sheet-v3.png).
+- Search: "the lease thing about the rent deposit" → lease screenshots ranked top with "semantic match" + keyword chips (worker query embed fast lane).
+- Static export (NEXT_PUBLIC_BASE_PATH=/recall, isolated distDir): served at /recall/ via http.server — workers load at the subpath, seed processes fully (19/19 ready), capture processes (dates + urgency), SW controls the scope, offline reload works (app shell + data) AND offline capture processes through the worker (worker script served from SW cache — warm-fetch works).
+- ESLint clean; tsc clean for src; dev.log no runtime errors; VLM visual QA on queue sheet + home screenshots: clean, aligned, no defects.
+
+Stage Summary:
+- V3 shipped: Web Worker pool (2–4 module workers) for ALL processing; priority lanes (light-first, heavy capped, never blocking); per-fragment mutex with cross-fragment concurrency; save-first preserved (raw content instantly saved + searchable).
+- Models run inside the worker with same-origin blob re-serving for their nested workers; pack downloads + progress fully worker-side.
+- New calm QueueSheet makes the non-blocking behaviour visible; BottomNav/AppHeader indicators show lane counts.
+- Worker-based query embedding fast lane for search; graceful fallbacks (inline µs compute for light ops when Workers are unavailable; honest job failures otherwise).
+- GitHub Pages static export re-verified at subpath incl. offline processing; README documents the V3 architecture; screenshots updated in download/.

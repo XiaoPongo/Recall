@@ -1,11 +1,26 @@
 /**
- * Independent job queue: CAPTURE → PERSIST → QUEUE → PROCESS → INDEX → SURFACE.
+ * Independent job queue — V3: non-blocking, priority lanes, concurrent.
  *
- * Every step (OCR, transcription, date extraction, urgency, embedding,
- * duplicate detection, thread association) is its own retryable job.
- * A failed job NEVER blocks the fragment — it stays saved and searchable
- * by raw content. Steps whose intelligence pack isn't downloaded are
- * marked "skipped" and re-queued once the pack arrives.
+ * CAPTURE → PERSIST → QUEUE → PROCESS → INDEX → SURFACE still holds, but
+ * the runner is no longer one serialized main-thread loop:
+ *
+ *   1. OFF THE UI THREAD — all compute (dates/urgency/category, lexical
+ *      and semantic embeddings, OCR, transcription, PDF text, dHash) runs
+ *      in a pool of Web Workers. The main thread only orchestrates and
+ *      writes results to IndexedDB.
+ *   2. PRIORITY LANES — 'light' jobs (text parsing, date/urgency
+ *      extraction on plain notes) are ALWAYS dispatched before 'heavy'
+ *      jobs (OCR / transcription / PDF / semantic embeddings), no matter
+ *      which was queued first. A queued screenshot OCR can never delay
+ *      the enrichment of a plain text note captured after it.
+ *   3. INDEPENDENT EXECUTION — jobs for different fragments run
+ *      concurrently across the pool (at most one job per fragment at a
+ *      time, so a fragment's steps stay ordered). One slow OCR never
+ *      delays unrelated fragments.
+ *
+ * Save-first is untouched: the fragment row is persisted BEFORE any job
+ * is queued, and raw content is searchable immediately. A failed or
+ * skipped job never blocks the fragment.
  */
 import { db, getSettings, isExcludedFromProcessing } from '../db'
 import type { Fragment, Job, JobStep, PackId, StepStatus } from '../types'
@@ -15,71 +30,38 @@ import { inferCategory } from './category'
 import { detectDuplicate } from './dedupe'
 import { associateThread } from './threads'
 import { lexicalVector } from '../ml/lexical'
-import { embedSemantic, extractPdfText, ocrImage, transcribeAudio } from '../ml/packs'
 import { decodeAudio16k } from '../ml/stt'
+import { getPool } from '../workers/pool'
+import { stepLane, type Lane } from '../workers/protocol'
+import type { WorkerOpName } from '../workers/protocol'
 
 const MAX_ATTEMPTS = 3
-
-const PRIORITY: Record<JobStep, number> = {
-  'extract-pdf': 10,
-  ocr: 20,
-  transcribe: 30,
-  dates: 40,
-  urgency: 45,
-  category: 50,
-  embed: 55,
-  dedupe: 65,
-  thread: 75,
-}
+/** concurrent main-thread appliers (dedupe/thread do DB reads + ms-scale math) */
+const MAIN_JOB_SLOTS = 2
 
 /** jobs that must wait for the type's text-extraction step to resolve */
-const EXTRACTION_DEPENDENT: JobStep[] = ['dates', 'urgency', 'category', 'embed', 'dedupe', 'thread']
+const EXTRACTION_DEPENDENT: JobStep[] = ['dates', 'urgency', 'category', 'embed', 'embed-semantic', 'dedupe', 'thread']
 const EMBED_DEPENDENT: JobStep[] = ['dedupe', 'thread']
 
-export function jobsForFragment(f: Fragment): JobStep[] {
+export function jobsForFragment(f: Fragment, semanticReady = false): JobStep[] {
+  const tail: JobStep[] = ['dates', 'urgency', 'category', 'embed']
+  if (semanticReady) tail.push('embed-semantic')
+  tail.push('dedupe', 'thread')
   switch (f.type) {
     case 'link':
     case 'text':
-      return ['dates', 'urgency', 'category', 'embed', 'dedupe', 'thread']
+      return tail
     case 'image':
-      return ['ocr', 'dates', 'urgency', 'category', 'embed', 'dedupe', 'thread']
+      return ['ocr', ...tail]
     case 'pdf':
-      return ['extract-pdf', 'dates', 'urgency', 'category', 'embed', 'dedupe', 'thread']
+      return ['extract-pdf', ...tail]
     case 'audio':
-      return ['transcribe', 'dates', 'urgency', 'category', 'embed', 'dedupe', 'thread']
+      return ['transcribe', ...tail]
   }
 }
 
 function allStepsSkipped(steps: JobStep[]): Partial<Record<JobStep, StepStatus>> {
   return Object.fromEntries(steps.map((s) => [s, 'skipped' as StepStatus]))
-}
-
-/** persist job rows + flip fragment into processing state */
-export async function enqueueFragmentJobs(f: Fragment): Promise<void> {
-  const settings = await getSettings()
-  const steps = jobsForFragment(f)
-  if (isExcludedFromProcessing(f, settings.boundaryRules)) {
-    // Memory boundary — excluded from OCR/embeddings/indexing entirely.
-    f.processing = { status: 'ready', steps: allStepsSkipped(steps) }
-    await db.fragments.put(f)
-    return
-  }
-  f.processing = { status: 'processing', steps: Object.fromEntries(steps.map((s) => [s, 'pending' as StepStatus])) }
-  await db.fragments.put(f)
-  const now = Date.now()
-  await db.jobs.bulkAdd(
-    steps.map((s) => ({
-      fragmentId: f.id,
-      type: s,
-      status: 'pending' as const,
-      attempts: 0,
-      maxAttempts: MAX_ATTEMPTS,
-      createdAt: now,
-      updatedAt: now,
-      priority: PRIORITY[s],
-    }))
-  )
-  kick()
 }
 
 function computeStatus(f: Fragment): Fragment['processing']['status'] {
@@ -97,33 +79,179 @@ function packForStep(step: JobStep): PackId | null {
       return 'documents'
     case 'transcribe':
       return 'voice'
+    case 'embed-semantic':
+      return 'semantic'
     default:
       return null
   }
 }
 
-function prereqResolved(f: Fragment, step: JobStep): 'ready' | 'wait' {
-  const extraction: JobStep | null =
-    f.type === 'image' ? 'ocr' : f.type === 'pdf' ? 'extract-pdf' : f.type === 'audio' ? 'transcribe' : null
-  if (extraction && EXTRACTION_DEPENDENT.includes(step)) {
-    const st = f.processing.steps[extraction]
-    if (st === 'pending' || st === 'running') return 'wait'
-    // failed extraction must NOT block downstream — run on raw content
+/* ------------------------------------------------------------------ */
+/* in-memory queue state                                                */
+/* ------------------------------------------------------------------ */
+
+interface QEntry {
+  job: Job
+  lane: Lane
+  /** retry backoff — not dispatchable before this timestamp */
+  notBefore: number
+}
+
+export interface RunningInfo {
+  job: Job
+  lane: Lane
+  startedAt: number
+}
+
+export interface RecentEvent {
+  step: JobStep
+  fragmentId: string
+  ok: boolean
+  error?: string
+  ms?: number
+  at: number
+}
+
+const pending: QEntry[] = []
+const running = new Map<QEntry, RunningInfo>()
+const runningByFragment = new Set<string>()
+/** fragmentId -> {type, steps} — cheap prereq checks without re-reading blobs */
+const fragIndex = new Map<string, { type: Fragment['type']; steps: Partial<Record<JobStep, StepStatus>> }>()
+const recent: RecentEvent[] = []
+
+function updateIndex(f: Fragment) {
+  fragIndex.set(f.id, { type: f.type, steps: f.processing.steps })
+}
+
+export interface QueueStatsSnapshot {
+  running: RunningInfo[]
+  pendingLight: number
+  pendingHeavy: number
+  recent: RecentEvent[]
+  pool: { size: number; heavyCap: number; alive: number; free: number } | null
+}
+
+export function getQueueStats(): QueueStatsSnapshot {
+  const pool = getPool()
+  return {
+    running: Array.from(running.values()),
+    pendingLight: pending.filter((e) => e.lane === 'light').length,
+    pendingHeavy: pending.filter((e) => e.lane === 'heavy').length,
+    recent: recent.slice(-12).reverse(),
+    pool: pool ? pool.stats() : null,
   }
-  if (EMBED_DEPENDENT.includes(step)) {
-    const st = f.processing.steps.embed
-    if (st === 'pending' || st === 'running') return 'wait'
-  }
-  return 'ready'
+}
+
+function pushRecent(e: QEntry, ok: boolean, error?: string, ms?: number) {
+  recent.push({ step: e.job.type, fragmentId: e.job.fragmentId, ok, error, ms, at: Date.now() })
+  if (recent.length > 40) recent.splice(0, recent.length - 40)
 }
 
 /* ------------------------------------------------------------------ */
-/* job executors                                                        */
+/* scheduler                                                            */
 /* ------------------------------------------------------------------ */
 
-const SKIPPED = Symbol('skipped')
+let kickTimer: ReturnType<typeof setTimeout> | null = null
+let kickAt = 0
 
-type ExecResult = typeof SKIPPED | void
+export function kick(delay = 0) {
+  const at = Date.now() + delay
+  if (kickTimer !== null && at >= kickAt) return
+  if (kickTimer !== null) clearTimeout(kickTimer)
+  kickAt = at
+  kickTimer = setTimeout(() => {
+    kickTimer = null
+    void dispatchLoop()
+  }, Math.max(0, at - Date.now()))
+}
+
+let dispatching = false
+
+async function dispatchLoop(): Promise<void> {
+  if (dispatching) {
+    kick(50)
+    return
+  }
+  dispatching = true
+  try {
+    for (;;) {
+      const pool = getPool()
+      const totalSlots = (pool?.size ?? 2) + MAIN_JOB_SLOTS
+      if (running.size >= totalSlots) break
+
+      const now = Date.now()
+      const heavyRunning = Array.from(running.values()).filter((r) => r.lane === 'heavy').length
+      const heavyCap = pool?.heavyCap ?? 1
+
+      // light first — ALWAYS, regardless of queue position
+      let entry = await nextRunnable('light', now)
+      // then heavy, capped so model jobs don't flood memory
+      if (!entry && heavyRunning < heavyCap) entry = await nextRunnable('heavy', now)
+      if (!entry) break
+
+      beginEntrySync(entry)
+      void runEntry(entry)
+    }
+  } finally {
+    dispatching = false
+  }
+}
+
+async function nextRunnable(lane: Lane, now: number): Promise<QEntry | null> {
+  const candidates = pending
+    .filter((e) => e.lane === lane && e.notBefore <= now && !runningByFragment.has(e.job.fragmentId))
+    .sort((a, b) => a.job.createdAt - b.job.createdAt || (a.job.id ?? 0) - (b.job.id ?? 0))
+  for (const e of candidates) {
+    if (!(await prereqResolved(e.job))) continue
+    pending.splice(pending.indexOf(e), 1)
+    return e
+  }
+  return null
+}
+
+async function prereqResolved(job: Job): Promise<boolean> {
+  let info = fragIndex.get(job.fragmentId)
+  if (!info) {
+    const f = await db.fragments.get(job.fragmentId)
+    if (!f) return true // orphan — the runner cleans it up
+    info = { type: f.type, steps: f.processing.steps }
+    fragIndex.set(job.fragmentId, info)
+  }
+  const extraction: JobStep | null =
+    info.type === 'image' ? 'ocr' : info.type === 'pdf' ? 'extract-pdf' : info.type === 'audio' ? 'transcribe' : null
+  if (extraction && EXTRACTION_DEPENDENT.includes(job.type)) {
+    const st = info.steps[extraction]
+    if (st === 'pending' || st === 'running') return false
+    // failed extraction must NOT block downstream — run on raw content
+  }
+  if (EMBED_DEPENDENT.includes(job.type)) {
+    const st = info.steps.embed
+    if (st === 'pending' || st === 'running') return false
+  }
+  return true
+}
+
+/** marks the job as running SYNCHRONOUSLY so no second dispatch can race it */
+function beginEntrySync(e: QEntry) {
+  runningByFragment.add(e.job.fragmentId)
+  running.set(e, { job: e.job, lane: e.lane, startedAt: Date.now() })
+  e.job.status = 'running'
+  e.job.startedAt = Date.now()
+  e.job.updatedAt = Date.now()
+  if (e.job.id != null) void db.jobs.put(e.job)
+}
+
+/* ------------------------------------------------------------------ */
+/* executors — worker compute + main-thread appliers                    */
+/* ------------------------------------------------------------------ */
+
+interface StepResult {
+  skipped?: boolean
+  /** dedupe/thread persist everything themselves */
+  external?: boolean
+}
+
+const SKIPPED: StepResult = { skipped: true }
 
 async function appendText(f: Fragment, text: string) {
   const t = (text || '').replace(/\s+\n/g, '\n').trim()
@@ -132,55 +260,101 @@ async function appendText(f: Fragment, text: string) {
   f.textContent = base ? `${base}\n${t}` : t
 }
 
-const EXECUTORS: Record<JobStep, (f: Fragment) => Promise<ExecResult>> = {
-  'extract-pdf': async (f) => {
+/** light ops fall back to inline compute when Workers are unsupported (µs-scale) */
+async function execLight<T>(op: WorkerOpName, payload: unknown, local: () => T): Promise<T> {
+  const pool = getPool()
+  if (!pool) return local()
+  return pool.exec<T>(op, payload)
+}
+
+function requirePool() {
+  const pool = getPool()
+  if (!pool) throw new Error('workers-unavailable')
+  return pool
+}
+
+function fragmentText(f: Fragment): string {
+  return `${f.rawContent}\n${f.textContent}`
+}
+
+const EXECUTORS: Record<JobStep, (f: Fragment) => Promise<StepResult>> = {
+  dates: async (f) => {
+    const text = fragmentText(f)
+    const dates = await execLight('enrich-dates', { text }, () => extractDates(text))
+    f.extracted = { ...f.extracted, dates }
+    return {}
+  },
+  urgency: async (f) => {
+    const text = fragmentText(f)
+    const urgency = await execLight('enrich-urgency', { text, dates: f.extracted.dates ?? [] }, () =>
+      scoreUrgency(text, f.extracted.dates ?? [])
+    )
+    f.extracted = { ...f.extracted, urgency }
+    return {}
+  },
+  category: async (f) => {
+    const text = fragmentText(f)
+    const c = await execLight('enrich-category', { text, dates: f.extracted.dates ?? [] }, () =>
+      inferCategory(text, f.extracted.dates ?? [])
+    )
+    f.extracted = { ...f.extracted, category: c ?? undefined }
+    return {}
+  },
+  embed: async (f) => {
+    const text = fragmentText(f).trim()
+    const { vector } = await execLight('embed-text', { text }, () => ({ vector: lexicalVector(text) }))
+    f.lexicalEmbedding = { model: 'lexical', dim: vector.length, vector }
+    return {}
+  },
+  'embed-semantic': async (f) => {
     const settings = await getSettings()
-    if (settings.packs.documents !== 'ready' || !f.blob) return SKIPPED
-    const buf = await f.blob.arrayBuffer()
-    const text = await extractPdfText(buf.slice(0))
-    await appendText(f, text.slice(0, 200_000))
+    const text = fragmentText(f).trim()
+    if (settings.packs.semantic !== 'ready' || !text) return SKIPPED
+    const pool = requirePool()
+    const { vector } = await pool.exec<{ vector: Float32Array }>('embed-semantic', { text }, { affinity: 'pinned' })
+    f.semanticEmbedding = { model: 'semantic', dim: vector.length, vector }
+    return {}
   },
   ocr: async (f) => {
     const settings = await getSettings()
     if (settings.packs.vision !== 'ready' || !f.blob) return SKIPPED
-    const text = await ocrImage(f.blob)
+    const pool = requirePool()
+    const buffer = await f.blob.arrayBuffer()
+    const { text } = await pool.exec<{ text: string }>('ocr', { buffer }, { affinity: 'pinned', transfer: [buffer] })
     await appendText(f, text)
+    return {}
+  },
+  'extract-pdf': async (f) => {
+    const settings = await getSettings()
+    if (settings.packs.documents !== 'ready' || !f.blob) return SKIPPED
+    const pool = requirePool()
+    const buffer = await f.blob.arrayBuffer()
+    const { text } = await pool.exec<{ text: string }>(
+      'pdf-extract',
+      { buffer },
+      { affinity: 'pinned', transfer: [buffer] }
+    )
+    await appendText(f, text.slice(0, 200_000))
+    return {}
   },
   transcribe: async (f) => {
     const settings = await getSettings()
     if (settings.packs.voice !== 'ready' || !f.blob) return SKIPPED
+    // decodeAudioData is a native async op — the browser decodes off-thread.
+    // The heavy whisper inference happens in the worker.
     const pcm = await decodeAudio16k(f.blob)
-    const text = await transcribeAudio(pcm)
+    const pool = requirePool()
+    const { text } = await pool.exec<{ text: string }>('transcribe', { pcm }, { affinity: 'pinned', transfer: [pcm] })
     await appendText(f, text)
-  },
-  dates: async (f) => {
-    f.extracted = { ...f.extracted, dates: extractDates(`${f.rawContent}\n${f.textContent}`) }
-  },
-  urgency: async (f) => {
-    f.extracted = { ...f.extracted, urgency: scoreUrgency(`${f.rawContent}\n${f.textContent}`, f.extracted.dates ?? []) }
-  },
-  category: async (f) => {
-    f.extracted = { ...f.extracted, category: inferCategory(`${f.rawContent}\n${f.textContent}`, f.extracted.dates ?? []) }
-  },
-  embed: async (f) => {
-    const text = `${f.rawContent}\n${f.textContent}`.trim()
-    f.lexicalEmbedding = { model: 'lexical', dim: 640, vector: lexicalVector(text) }
-    const settings = await getSettings()
-    if (settings.packs.semantic === 'ready' && !isExcludedFromProcessing(f, settings.boundaryRules) && text) {
-      try {
-        const [v] = await embedSemantic([text])
-        f.semanticEmbedding = { model: 'semantic', dim: v.length, vector: v }
-      } catch (e) {
-        // semantic failure is non-fatal — lexical index still works
-        console.warn('[recall] semantic embed failed, keeping lexical only:', (e as Error)?.message)
-      }
-    }
+    return {}
   },
   dedupe: async (f) => {
     await detectDuplicate(f)
+    return { external: true }
   },
   thread: async (f) => {
     await associateThread(f.id)
+    return { external: true }
   },
 }
 
@@ -188,93 +362,105 @@ const EXECUTORS: Record<JobStep, (f: Fragment) => Promise<ExecResult>> = {
 /* runner                                                               */
 /* ------------------------------------------------------------------ */
 
-let running = false
-let pendingKick: ReturnType<typeof setTimeout> | null = null
-
-export function kick(delay = 60) {
-  if (pendingKick) return
-  pendingKick = setTimeout(async () => {
-    pendingKick = null
-    await runLoop()
-  }, delay)
-}
-
-async function runLoop() {
-  if (running) return
-  running = true
+async function runEntry(e: QEntry): Promise<void> {
+  const startedAt = Date.now()
+  const { job } = e
   try {
-    for (;;) {
-      const claimed = await claimNextRunnable()
-      if (!claimed) break
-      await runJob(claimed)
+    const f = await db.fragments.get(job.fragmentId)
+    if (!f) {
+      if (job.id != null) await db.jobs.delete(job.id)
+      return
     }
-  } finally {
-    running = false
-  }
-}
-
-async function claimNextRunnable(): Promise<Job | null> {
-  return await db.transaction('rw', db.jobs, db.fragments, async () => {
-    const candidates = (await db.jobs.where('status').equals('pending').toArray())
-      .sort((a, b) => a.priority - b.priority || a.createdAt - b.createdAt)
-    for (const job of candidates) {
-      const f = await db.fragments.get(job.fragmentId)
-      if (!f) {
-        await db.jobs.delete(job.id!)
-        continue
-      }
-      if (prereqResolved(f, job.type) !== 'ready') continue
-      job.status = 'running'
-      job.updatedAt = Date.now()
-      await db.jobs.put(job)
-      return job
-    }
-    return null
-  })
-}
-
-async function runJob(job: Job) {
-  const f = await db.fragments.get(job.fragmentId)
-  if (!f) {
-    await db.jobs.delete(job.id!)
-    return
-  }
-  try {
     const result = await EXECUTORS[job.type](f)
-    // Re-read to merge anything the executor persisted itself (dedupe/thread)
+    // re-read to merge anything an executor persisted itself (dedupe/thread)
     const fresh = (await db.fragments.get(job.fragmentId)) ?? f
-    if (job.type !== 'dedupe' && job.type !== 'thread') {
+    if (!result.external) {
       fresh.textContent = f.textContent
       fresh.extracted = f.extracted
       fresh.lexicalEmbedding = f.lexicalEmbedding
       fresh.semanticEmbedding = f.semanticEmbedding
       fresh.perceptualHash = f.perceptualHash ?? fresh.perceptualHash
     }
-    fresh.processing.steps[job.type] = result === SKIPPED ? 'skipped' : 'done'
+    fresh.processing.steps[job.type] = result.skipped ? 'skipped' : 'done'
     fresh.processing.status = computeStatus(fresh)
     await db.fragments.put(fresh)
-    await db.jobs.delete(job.id!)
-    kick()
-  } catch (e) {
+    updateIndex(fresh)
+    if (job.id != null) await db.jobs.delete(job.id)
+    pushRecent(e, true, undefined, Date.now() - startedAt)
+  } catch (e2) {
+    const msg = (e2 as Error)?.message ?? String(e2)
     const attempts = job.attempts + 1
-    const msg = (e as Error)?.message ?? String(e)
     if (attempts >= job.maxAttempts) {
       // fragment remains saved & searchable by raw content
-      const fresh = (await db.fragments.get(job.fragmentId)) ?? f
-      fresh.processing.steps[job.type] = 'failed'
-      fresh.processing.lastError = msg
-      fresh.processing.status = computeStatus(fresh)
-      await db.fragments.put(fresh)
-      await db.jobs.delete(job.id!)
-      kick()
+      const f = await db.fragments.get(job.fragmentId)
+      if (f) {
+        f.processing.steps[job.type] = 'failed'
+        f.processing.lastError = msg
+        f.processing.status = computeStatus(f)
+        await db.fragments.put(f)
+        updateIndex(f)
+      }
+      if (job.id != null) await db.jobs.delete(job.id)
+      pushRecent(e, false, msg, Date.now() - startedAt)
     } else {
-      await db.jobs.update(job.id!, { attempts, status: 'pending', updatedAt: Date.now(), error: msg })
+      job.attempts = attempts
+      job.status = 'pending'
+      job.error = msg
+      job.updatedAt = Date.now()
+      if (job.id != null) await db.jobs.put(job)
+      pending.push({ job, lane: e.lane, notBefore: Date.now() + 1200 * attempts })
       kick(1200 * attempts)
     }
+  } finally {
+    runningByFragment.delete(job.fragmentId)
+    running.delete(e)
+    kick()
   }
 }
 
-/** reset jobs stuck in 'running' after a crash/reload — called on app start */
+/* ------------------------------------------------------------------ */
+/* public API                                                           */
+/* ------------------------------------------------------------------ */
+
+async function addJobs(entries: Array<{ fragmentId: string; step: JobStep }>, now = Date.now()): Promise<void> {
+  if (!entries.length) return
+  const rows: Job[] = entries.map(({ fragmentId, step: s }) => ({
+    fragmentId,
+    type: s,
+    status: 'pending' as const,
+    attempts: 0,
+    maxAttempts: MAX_ATTEMPTS,
+    createdAt: now,
+    updatedAt: now,
+    priority: stepLane(s) === 'light' ? 0 : 1,
+    lane: stepLane(s),
+  }))
+  const keys = await Promise.all(rows.map((r) => db.jobs.add(r)))
+  rows.forEach((r, i) => {
+    r.id = keys[i]
+    pending.push({ job: r, lane: r.lane as Lane, notBefore: 0 })
+  })
+  kick()
+}
+
+/** persist job rows + flip fragment into processing state */
+export async function enqueueFragmentJobs(f: Fragment): Promise<void> {
+  const settings = await getSettings()
+  const steps = jobsForFragment(f, settings.packs.semantic === 'ready')
+  if (isExcludedFromProcessing(f, settings.boundaryRules)) {
+    // Memory boundary — excluded from OCR/embeddings/indexing entirely.
+    f.processing = { status: 'ready', steps: allStepsSkipped(steps) }
+    await db.fragments.put(f)
+    updateIndex(f)
+    return
+  }
+  f.processing = { status: 'processing', steps: Object.fromEntries(steps.map((s) => [s, 'pending' as StepStatus])) }
+  await db.fragments.put(f)
+  updateIndex(f)
+  await addJobs(steps.map((s) => ({ fragmentId: f.id, step: s })))
+}
+
+/** reset jobs stuck in 'running' after a crash/reload */
 export async function recoverStuckJobs(): Promise<void> {
   await db.jobs.filter((j) => j.status === 'running').modify({ status: 'pending' as const, updatedAt: Date.now() })
 }
@@ -283,80 +469,77 @@ export async function recoverStuckJobs(): Promise<void> {
 export async function requeueForPack(pack: PackId): Promise<void> {
   const settings = await getSettings()
   const step: JobStep | null =
-    pack === 'vision' ? 'ocr' : pack === 'documents' ? 'extract-pdf' : pack === 'voice' ? 'transcribe' : null
+    pack === 'vision'
+      ? 'ocr'
+      : pack === 'documents'
+        ? 'extract-pdf'
+        : pack === 'voice'
+          ? 'transcribe'
+          : pack === 'semantic'
+            ? 'embed-semantic'
+            : null
+  if (!step) return
   const now = Date.now()
-  if (step) {
-    const frags = (await db.fragments.toArray()).filter(
-      (f) => f.processing.steps[step] === 'skipped' && !isExcludedFromProcessing(f, settings.boundaryRules)
-    )
-    for (const f of frags) {
-      f.processing.steps[step] = 'pending'
-      f.processing.status = computeStatus(f)
-      await db.fragments.put(f)
-      await db.jobs.add({
-        fragmentId: f.id,
-        type: step,
-        status: 'pending',
-        attempts: 0,
-        maxAttempts: MAX_ATTEMPTS,
-        createdAt: now,
-        updatedAt: now,
-        priority: PRIORITY[step],
-      })
-    }
+  const skippedIsStep = (f: Fragment) => f.processing.steps[step] === 'skipped'
+  const needsSemantic = (f: Fragment) => !f.semanticEmbedding && (f.textContent || f.rawContent)
+
+  const frags = (await db.fragments.toArray()).filter(
+    (f) =>
+      !isExcludedFromProcessing(f, settings.boundaryRules) &&
+      (pack === 'semantic' ? needsSemantic(f) : skippedIsStep(f))
+  )
+
+  for (const f of frags) {
+    f.processing.steps[step] = 'pending'
+    f.processing.status = computeStatus(f)
+    await db.fragments.put(f)
+    updateIndex(f)
   }
-  if (pack === 'semantic') {
-    const frags = (await db.fragments.toArray()).filter(
-      (f) => !f.semanticEmbedding && !isExcludedFromProcessing(f, settings.boundaryRules) && (f.textContent || f.rawContent)
-    )
-    await db.jobs.bulkAdd(
-      frags.map((f) => ({
-        fragmentId: f.id,
-        type: 'embed' as JobStep,
-        status: 'pending' as const,
-        attempts: 0,
-        maxAttempts: MAX_ATTEMPTS,
-        createdAt: now,
-        updatedAt: now,
-        priority: PRIORITY.embed,
-      }))
-    )
-  }
-  kick(200)
+  await addJobs(frags.map((f) => ({ fragmentId: f.id, step })), now)
 }
 
 /** rebuild lexical (+semantic when available) index for every fragment */
 export async function rebuildIndex(): Promise<void> {
   const settings = await getSettings()
   const now = Date.now()
+  const semanticReady = settings.packs.semantic === 'ready'
+  const entries: Array<{ fragmentId: string; step: JobStep }> = []
   await db.transaction('rw', db.fragments, async () => {
     const frags = (await db.fragments.toArray()).filter((f) => !isExcludedFromProcessing(f, settings.boundaryRules))
     for (const f of frags) {
       f.lexicalEmbedding = undefined
       f.semanticEmbedding = undefined
       f.processing.steps.embed = 'pending'
+      f.processing.steps['embed-semantic'] = semanticReady ? 'pending' : 'skipped'
       f.processing.status = computeStatus(f)
       await db.fragments.put(f)
+      updateIndex(f)
+      if (f.textContent || f.rawContent) {
+        entries.push({ fragmentId: f.id, step: 'embed' })
+        if (semanticReady) entries.push({ fragmentId: f.id, step: 'embed-semantic' })
+      }
     }
   })
-  const frags = await db.fragments.toArray()
-  await db.jobs.bulkAdd(
-    frags
-      .filter((f) => f.processing.steps.embed === 'pending')
-      .map((f) => ({
-        fragmentId: f.id,
-        type: 'embed' as JobStep,
-        status: 'pending' as const,
-        attempts: 0,
-        maxAttempts: MAX_ATTEMPTS,
-        createdAt: now,
-        updatedAt: now,
-        priority: PRIORITY.embed,
-      }))
-  )
-  kick(200)
+  await addJobs(entries, now)
 }
 
+/** boot: recover crash-stuck jobs, rebuild the in-memory queue, pre-warm workers */
 export function startQueue() {
-  void recoverStuckJobs().then(() => kick(400))
+  void (async () => {
+    await recoverStuckJobs()
+    try {
+      await db.fragments.each((f) => updateIndex(f))
+    } catch (e) {
+      console.warn('[recall] fragment index build failed', (e as Error)?.message)
+    }
+    const rows = await db.jobs.where('status').equals('pending').toArray()
+    for (const job of rows) {
+      pending.push({ job, lane: job.lane ?? stepLane(job.type), notBefore: 0 })
+    }
+    // pre-warm the worker pool so the first capture doesn't pay spawn cost
+    getPool()
+      ?.ensure()
+      .catch(() => {})
+    kick(400)
+  })()
 }

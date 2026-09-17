@@ -1,81 +1,79 @@
 /**
  * Memory threads — automatic grouping by time proximity + topic similarity.
  * No manual folders, ever. Members link into connected clusters.
+ *
+ * Clustering DECISIONS (similarity, bridge merges, titles, cohesion) are
+ * computed inside the processing worker; this module owns the IndexedDB
+ * reads/writes and applies the worker's plan.
  */
 import { db } from '../db'
 import type { Confidence, Fragment, Thread } from '../types'
-import { cosine, salientTerms } from '../ml/lexical'
+import { getPool } from '../workers/pool'
+import { associatePlan, relatedScores, threadMeta, toThreadOther, toThreadSelf } from './threads-core'
+import type { RelatedScore, ThreadMetaResult, ThreadPlan } from '../workers/protocol'
 
-const TIME_WINDOW_MS = 45 * 60 * 1000 // fragments saved within 45 minutes
-const STRONG_SIM = 0.42
-const LINK_SIM = 0.30
-const TIME_LINK_SIM = 0.14
+async function planInWorker(self: Fragment, others: Fragment[]): Promise<ThreadPlan> {
+  const payload = {
+    self: toThreadSelf(self),
+    others: others.map(toThreadOther),
+  }
+  const pool = getPool()
+  if (pool) {
+    try {
+      return await pool.exec<ThreadPlan>('thread-plan', payload)
+    } catch (e) {
+      console.warn('[recall] thread plan in worker failed, computing inline:', (e as Error)?.message)
+    }
+  }
+  return associatePlan(payload.self, payload.others)
+}
 
-function sim(a: Fragment, b: Fragment): number {
-  const sem = cosine(a.semanticEmbedding?.vector, b.semanticEmbedding?.vector)
-  if (sem > 0) return sem
-  return cosine(a.lexicalEmbedding?.vector, b.lexicalEmbedding?.vector)
+async function metaInWorker(members: Fragment[]): Promise<ThreadMetaResult> {
+  const payload = {
+    members: members.map((m) => ({
+      text: `${m.textContent} ${m.rawContent}`,
+      type: m.type,
+      createdAt: m.createdAt,
+      hasDates: (m.extracted?.dates?.length ?? 0) > 0,
+      lex: m.lexicalEmbedding?.vector ?? null,
+      sem: m.semanticEmbedding?.vector ?? null,
+    })),
+  }
+  const pool = getPool()
+  if (pool) {
+    try {
+      return await pool.exec<ThreadMetaResult>('thread-meta', payload)
+    } catch (e) {
+      console.warn('[recall] thread meta in worker failed, computing inline:', (e as Error)?.message)
+    }
+  }
+  return threadMeta(payload.members)
 }
 
 export async function associateThread(fragmentId: string): Promise<void> {
   const f = await db.fragments.get(fragmentId)
   if (!f) return
-  const others = (await db.fragments.toArray()).filter(
-    (o) => o.id !== f.id && (o.textContent || o.rawContent)
-  )
-  if (!others.length) {
+  const others = (await db.fragments.toArray()).filter((o) => o.id !== f.id)
+
+  const plan = await planInWorker(f, others)
+
+  if (plan.action === 'create') {
     await createThreadFor(f)
     return
   }
 
-  const scored = others
-    .map((o) => {
-      const s = sim(f, o)
-      const dt = Math.abs(o.createdAt - f.createdAt)
-      const timeBoost = dt < TIME_WINDOW_MS ? 0.28 * (1 - dt / TIME_WINDOW_MS) : 0
-      return { o, s, dt, total: s + timeBoost }
-    })
-    .sort((a, b) => b.total - a.total)
-
-  const related = scored.filter((x) => x.s >= STRONG_SIM || (x.dt < TIME_WINDOW_MS && x.s >= TIME_LINK_SIM)).slice(0, 8)
-
-  if (!related.length) {
-    await createThreadFor(f)
-    return
+  let target: string
+  if (plan.action === 'merge-join') {
+    // bridge merge: a second strong thread means these topics are actually one
+    await mergeThreads(plan.from, plan.into)
+    target = plan.into
+  } else {
+    target = plan.threadId
   }
 
-  // dominant thread among related fragments
-  const threadScores = new Map<string, number>()
-  for (const r of related) {
-    if (!r.o.threadId) continue
-    threadScores.set(r.o.threadId, (threadScores.get(r.o.threadId) ?? 0) + r.total)
-  }
-
-  let dominant: string | null = null
-  let bestScore = 0
-  threadScores.forEach((v, k) => {
-    if (v > bestScore) {
-      bestScore = v
-      dominant = k
-    }
-  })
-
-  if (!dominant) {
-    await createThreadFor(f)
-    return
-  }
-
-  // bridge merge: a second strong thread means these topics are actually one
-  const second = Array.from(threadScores.entries())
-    .filter(([k]) => k !== dominant)
-    .sort((a, b) => b[1] - a[1])[0]
-  if (second && second[1] > bestScore * 0.6) {
-    await mergeThreads(second[0], dominant)
-  }
-
-  f.threadId = dominant
+  f.threadId = target
   await db.fragments.put(f)
-  await recomputeThreadMeta(dominant)
+  await recomputeThreadMeta(target)
 }
 
 async function createThreadFor(f: Fragment): Promise<string> {
@@ -84,7 +82,7 @@ async function createThreadFor(f: Fragment): Promise<string> {
     id,
     createdAt: f.createdAt,
     updatedAt: Date.now(),
-    terms: salientTerms([`${f.textContent} ${f.rawContent}`], 3),
+    terms: [],
     title: '',
     summary: '',
     confidence: 'low',
@@ -110,19 +108,6 @@ async function mergeThreads(fromId: string, intoId: string): Promise<void> {
   await recomputeThreadMeta(intoId)
 }
 
-function threadHint(members: Fragment[]): string {
-  const n = members.length || 1
-  const links = members.filter((m) => m.type === 'link' || m.type === 'pdf').length
-  const images = members.filter((m) => m.type === 'image').length
-  const audio = members.filter((m) => m.type === 'audio').length
-  const dated = members.filter((m) => (m.extracted?.dates?.length ?? 0) > 0).length
-  if (links / n >= 0.5) return 'research'
-  if (images / n >= 0.5) return 'references'
-  if (audio / n >= 0.5) return 'notes'
-  if (dated / n >= 0.5) return 'planning'
-  return 'topic'
-}
-
 export async function recomputeThreadMeta(threadId: string): Promise<void> {
   const thread = await db.threads.get(threadId)
   if (!thread) return
@@ -132,46 +117,15 @@ export async function recomputeThreadMeta(threadId: string): Promise<void> {
     return
   }
 
-  const sample = members.slice(0, 12)
-  let pairs = 0
-  let sum = 0
-  for (let i = 0; i < sample.length; i++) {
-    for (let j = i + 1; j < sample.length; j++) {
-      sum += sim(sample[i], sample[j])
-      pairs++
-    }
-  }
-  const cohesion = pairs > 0 ? sum / pairs : 0
+  const meta = await metaInWorker(members)
 
-  const terms = salientTerms(
-    members.slice(0, 20).map((m) => `${m.textContent} ${m.rawContent}`),
-    4
-  )
-  const hint = threadHint(members)
-  const topTerm = terms[0] ?? 'saved'
-  const title = `${capitalize(topTerm)} ${hint}`
-
-  const spanDays = Math.max(
-    1,
-    Math.ceil((Math.max(...members.map((m) => m.createdAt)) - Math.min(...members.map((m) => m.createdAt))) / 86_400_000)
-  )
-  const confidence: Confidence =
-    members.length >= 3 && cohesion >= 0.4 ? 'high' : members.length >= 2 && cohesion >= 0.24 ? 'medium' : 'low'
-
-  const daysLabel = spanDays === 1 ? 'the same day' : `about ${spanDays} days`
-  thread.terms = terms
-  thread.title = title
-  thread.summary =
-    `Looks like ${hint === 'research' ? 'research on' : 'a topic about'} “${topTerm}” — ${members.length} ` +
-    `fragment${members.length === 1 ? '' : 's'} saved over ${daysLabel} (${confidence} confidence)`
-  thread.cohesion = cohesion
-  thread.confidence = confidence
+  thread.terms = meta.terms
+  thread.title = meta.title
+  thread.summary = meta.summary
+  thread.cohesion = meta.cohesion
+  thread.confidence = meta.confidence
   thread.updatedAt = Date.now()
   await db.threads.put(thread)
-}
-
-function capitalize(s: string): string {
-  return s.length ? s[0].toUpperCase() + s.slice(1) : s
 }
 
 /** after deleting a fragment, prune its thread if it became empty */
@@ -187,6 +141,7 @@ export async function pruneThread(threadId?: string): Promise<void> {
 
 /**
  * "Why did I save this?" — reconstructed context for a fragment.
+ * Neighbor scoring runs in the worker; DB/thread lookups stay here.
  */
 export interface RelatedFragment {
   fragment: Fragment
@@ -201,23 +156,37 @@ export async function relatedContext(f: Fragment): Promise<{
   note?: string
 }> {
   const others = (await db.fragments.toArray()).filter((o) => o.id !== f.id)
-  const out: RelatedFragment[] = []
-  const windowMs = 25 * 60 * 1000
 
-  for (const o of others) {
-    const dt = Math.abs(o.createdAt - f.createdAt)
-    const s = sim(f, o)
-    if (dt < windowMs && s >= 0.08) {
-      out.push({ fragment: o, score: s, reason: `saved ${dt < 60_000 ? 'moments' : `${Math.round(dt / 60_000)} min`} apart` })
-    } else if (o.threadId && o.threadId === f.threadId) {
-      out.push({ fragment: o, score: s, reason: 'same memory thread' })
-    } else if (s >= 0.4) {
-      out.push({ fragment: o, score: s, reason: 'similar content' })
+  const payload = {
+    self: toThreadSelf(f),
+    others: others.map(toThreadOther),
+  }
+  let neighborsScored: RelatedScore[]
+  const pool = getPool()
+  if (pool) {
+    try {
+      neighborsScored = (await pool.exec<{ neighbors: RelatedScore[] }>('related-scores', payload)).neighbors
+    } catch (e) {
+      console.warn('[recall] related scoring in worker failed, inline fallback:', (e as Error)?.message)
+      neighborsScored = relatedScores(payload).neighbors
     }
+  } else {
+    neighborsScored = relatedScores(payload).neighbors
   }
 
-  out.sort((a, b) => b.score - a.score)
-  const neighbors = out.slice(0, 6)
+  const byId = new Map(others.map((o) => [o.id, o]))
+  const neighbors: RelatedFragment[] = []
+  for (const n of neighborsScored) {
+    const frag = byId.get(n.id)
+    if (!frag) continue
+    const reason =
+      n.reason === 'time'
+        ? `saved ${n.minutes < 1 ? 'moments' : `${n.minutes} min`} apart`
+        : n.reason === 'thread'
+          ? 'same memory thread'
+          : 'similar content'
+    neighbors.push({ fragment: frag, score: n.score, reason })
+  }
 
   let thread: Thread | undefined
   let threadMembers: Fragment[] | undefined
@@ -225,12 +194,13 @@ export async function relatedContext(f: Fragment): Promise<{
   if (f.threadId) {
     thread = await db.threads.get(f.threadId)
     threadMembers = await db.fragments.where('threadId').equals(f.threadId).toArray()
-    const mins = Math.round(
-      (Math.max(...threadMembers.map((m) => m.createdAt)) - Math.min(...threadMembers.map((m) => m.createdAt))) / 60_000
-    )
     if (threadMembers.length >= 2) {
+      const mins = Math.round(
+        (Math.max(...threadMembers.map((m) => m.createdAt)) - Math.min(...threadMembers.map((m) => m.createdAt))) / 60_000
+      )
       const span = mins < 90 ? `${mins} minutes` : `${Math.round(mins / 60)} hours`
-      note = `Likely related to: ${thread?.title ?? 'a topic'} — based on ${threadMembers.length} fragments saved within ${span} (${thread?.confidence ?? 'low'} confidence)`
+      const confidence: Confidence = thread?.confidence ?? 'low'
+      note = `Likely related to: ${thread?.title ?? 'a topic'} — based on ${threadMembers.length} fragments saved within ${span} (${confidence} confidence)`
     }
   }
 

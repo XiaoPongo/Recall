@@ -23,6 +23,8 @@ interface UIState {
   recorderOpen: boolean
   /** increments to ask the SearchBar to grab focus (bottom-nav Search tab) */
   searchFocusToken: number
+  /** the calm "background processing" drawer */
+  queueSheetOpen: boolean
   setView: (v: MainView) => void
   setLens: (l: Lens) => void
   setQuery: (q: string) => void
@@ -32,6 +34,7 @@ interface UIState {
   setSearch: (hits: SearchHit[] | null, timeLabel?: string) => void
   setSearching: (b: boolean) => void
   setRecorderOpen: (b: boolean) => void
+  setQueueSheetOpen: (b: boolean) => void
   focusSearch: () => void
 }
 
@@ -46,6 +49,7 @@ export const useUI = create<UIState>((set) => ({
   searching: false,
   recorderOpen: false,
   searchFocusToken: 0,
+  queueSheetOpen: false,
   setView: (view) => set({ view }),
   setLens: (lens) => set({ lens, view: 'inbox' }),
   setQuery: (query) => set({ query, view: query.trim() ? 'search' : 'inbox' }),
@@ -55,5 +59,6 @@ export const useUI = create<UIState>((set) => ({
   setSearch: (searchHits, searchTimeLabel) => set({ searchHits, searchTimeLabel }),
   setSearching: (searching) => set({ searching }),
   setRecorderOpen: (recorderOpen) => set({ recorderOpen }),
+  setQueueSheetOpen: (queueSheetOpen) => set({ queueSheetOpen }),
   focusSearch: () => set((s) => ({ searchFocusToken: s.searchFocusToken + 1, view: 'search' })),
 }))

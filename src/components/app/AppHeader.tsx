@@ -1,12 +1,14 @@
 'use client'
 
-import { Download, Monitor, Moon, Sun } from 'lucide-react'
+import { Download, Loader2, Monitor, Moon, Sun } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { LocalBadge, RippleMark } from './bits'
 import { useTheme } from '@/lib/theme'
+import { useUI } from '@/lib/store'
 
-export function AppHeader({ installable, onInstall }: { installable: boolean; onInstall: () => void }) {
+export function AppHeader({ installable, onInstall, processingCount }: { installable: boolean; onInstall: () => void; processingCount: number }) {
   const { pref, setPref } = useTheme()
+  const setQueueSheetOpen = useUI((s) => s.setQueueSheetOpen)
 
   // cycle: system → light → dark → system
   const next = pref === 'system' ? 'light' : pref === 'light' ? 'dark' : 'system'
@@ -26,6 +28,18 @@ export function AppHeader({ installable, onInstall }: { installable: boolean; on
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
+          {processingCount > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setQueueSheetOpen(true)}
+              className="h-9 gap-1.5 rounded-full px-3 text-xs text-muted-foreground"
+              aria-label="Background processing — tap for details"
+            >
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+              <span className="hidden sm:inline">{processingCount} in background</span>
+            </Button>
+          )}
           {installable && (
             <Button variant="outline" size="sm" onClick={onInstall} className="h-9 gap-1.5 rounded-full text-xs">
               <Download className="h-3.5 w-3.5" /> Install

@@ -40,7 +40,17 @@ export type CategoryLabel =
   | 'idea'
   | 'note'
 
-export type JobStep = 'extract-pdf' | 'ocr' | 'transcribe' | 'dates' | 'urgency' | 'category' | 'embed' | 'dedupe' | 'thread'
+export type JobStep =
+  | 'extract-pdf'
+  | 'ocr'
+  | 'transcribe'
+  | 'dates'
+  | 'urgency'
+  | 'category'
+  | 'embed'
+  | 'embed-semantic'
+  | 'dedupe'
+  | 'thread'
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'blocked'
 
@@ -132,8 +142,12 @@ export interface Job {
   error?: string
   createdAt: number
   updatedAt: number
-  /** small priority int — lower runs first */
+  /** small priority int — lower runs first (observability; scheduling uses lanes) */
   priority: number
+  /** 'light' jobs (ms-scale text math) always run before 'heavy' (model) jobs */
+  lane?: 'light' | 'heavy'
+  /** when this job was dispatched (queue observability) */
+  startedAt?: number
 }
 
 export type PackId = 'semantic' | 'vision' | 'voice' | 'documents'

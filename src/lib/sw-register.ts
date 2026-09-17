@@ -11,6 +11,10 @@
 
 export function registerSW(): void {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return
+  // Dev servers reuse stable chunk names across recompiles, so an installed
+  // SW (cache-first on /_next/static) would serve stale code forever.
+  // Offline mode is a property of the production build — verify it there.
+  if (process.env.NODE_ENV !== 'production') return
   if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
     // SW requires a secure context; the app still runs without it (no offline caching)
     console.info('[recall] skipping SW registration (insecure context)')

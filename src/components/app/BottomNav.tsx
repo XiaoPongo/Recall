@@ -4,13 +4,15 @@
  * Mobile bottom navigation — thumb-first, safe-area aware.
  * The center of attention: Home (capture + feed). Search focuses the
  * always-visible search bar; Settings opens the settings overlay.
+ * The processing strip is tappable and opens the calm queue drawer.
  */
 import { CalendarDays, Home, Layers, Loader2, Search, Settings2 } from 'lucide-react'
 import { useUI, type MainView } from '@/lib/store'
 import { cn } from '@/lib/utils'
 
-export function BottomNav({ processingCount }: { processingCount: number }) {
-  const { view, setView, setQuery, focusSearch, setSettingsOpen, settingsOpen } = useUI()
+export function BottomNav({ lightCount, heavyCount }: { lightCount: number; heavyCount: number }) {
+  const { view, setView, setQuery, focusSearch, setSettingsOpen, settingsOpen, setQueueSheetOpen } = useUI()
+  const processingCount = lightCount + heavyCount
 
   const TABS: Array<{
     id: MainView | 'settings'
@@ -66,10 +68,17 @@ export function BottomNav({ processingCount }: { processingCount: number }) {
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
     >
       {processingCount > 0 && (
-        <div className="flex items-center justify-center gap-1.5 border-b border-border/50 bg-muted/30 py-1 text-[10px] text-muted-foreground">
+        <button
+          onClick={() => setQueueSheetOpen(true)}
+          className="flex w-full items-center justify-center gap-1.5 border-b border-border/50 bg-muted/30 py-1.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-muted/60"
+          aria-label={`Background processing: ${lightCount} quick and ${heavyCount} heavy jobs — tap for details`}
+        >
           <Loader2 className="h-3 w-3 animate-spin" />
-          processing {processingCount} fragment{processingCount === 1 ? '' : 's'} on-device
-        </div>
+          {lightCount > 0 && <span>{lightCount} quick</span>}
+          {lightCount > 0 && heavyCount > 0 && <span aria-hidden="true">·</span>}
+          {heavyCount > 0 && <span>{heavyCount} heavy</span>}
+          <span className="opacity-70">in background — never blocking you</span>
+        </button>
       )}
       <div className="mx-auto grid max-w-lg grid-cols-5">
         {TABS.map((t) => {

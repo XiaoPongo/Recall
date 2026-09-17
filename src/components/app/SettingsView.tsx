@@ -140,7 +140,7 @@ function IntelligenceTab({ settings }: { settings: AppSettings }) {
     <div className="mx-auto max-w-xl space-y-4">
       <SectionTitle
         title="Local intelligence"
-        body="Models run entirely on this device. Downloads happen once; afterwards they're cached and work offline. You can always add or remove these later."
+        body="Models run entirely on this device, inside background Web Workers — capturing, searching and browsing never wait on them. Downloads happen once; afterwards they're cached and work offline. You can always add or remove these later."
       />
       {PACKS.map((p) => {
         const status = settings.packs[p.id]

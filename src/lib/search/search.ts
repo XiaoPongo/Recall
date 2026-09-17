@@ -6,7 +6,7 @@
  */
 import type { Fragment, FragmentType, SearchHit, Thread } from '../types'
 import { cosine, lexicalVector, stemLite, tokenize, words } from '../ml/lexical'
-import { embedSemantic } from '../ml/packs'
+import { embedQuery } from '../workers/pool'
 import { parseAnchorQuery, parseTimeExpression, type TimeWindow } from './timeparse'
 import { isExcludedFromProcessing } from '../db'
 import { nearestFutureDateMs } from '../pipeline/dates'
@@ -104,12 +104,18 @@ export async function searchFragments(
     .trim()
 
   const queryTokens = tokenize(cleanQuery || working)
+
+  // query embeddings run in a worker (fast lane — they jump ahead of
+  // background jobs) so search never blocks on the UI thread and never
+  // waits behind an in-progress OCR. The anchor vector below is a
+  // sub-millisecond lexical hash, kept inline for latency.
   const qLex = lexicalVector(working)
 
   let qSem: Float32Array | null = null
   if (opts.semanticReady && cleanQuery) {
     try {
-      ;[qSem] = await embedSemantic([cleanQuery])
+      const eq = await embedQuery(working, true)
+      qSem = eq.semantic
     } catch {
       qSem = null
     }

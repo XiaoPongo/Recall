@@ -9,7 +9,7 @@
  * static server + plugins (App / LocalNotifications / Filesystem). The
  * share inbox DB contract below is stable and can be reused as-is.
  */
-const VERSION = 'v4'
+const VERSION = 'v5'
 const STATIC_CACHE = `recall-static-${VERSION}`
 const MODEL_CACHE = 'recall-models-v1'
 const NAV_CACHE = `recall-nav-${VERSION}`

@@ -31,6 +31,7 @@ import { FragmentCard } from './FragmentCard'
 import { SettingsView } from './SettingsView'
 import { SetupWizard } from './SetupWizard'
 import { VoiceRecorder } from './VoiceRecorder'
+import { QueueSheet } from './QueueSheet'
 import { EmptyState } from './bits'
 
 interface BeforeInstallPromptEvent extends Event {
@@ -136,7 +137,14 @@ export function MemoryApp() {
     }
   }, [ui.query, fragments, settings])
 
-  const processingCount = useMemo(() => jobs?.filter((j) => j.status === 'pending' || j.status === 'running').length ?? 0, [jobs])
+  const laneCounts = useMemo(() => {
+    const active = (jobs ?? []).filter((j) => j.status === 'pending' || j.status === 'running')
+    return {
+      light: active.filter((j) => (j.lane ?? 'light') === 'light').length,
+      heavy: active.filter((j) => j.lane === 'heavy').length,
+      total: active.length,
+    }
+  }, [jobs])
 
   if (!settings || fragments === undefined || threads === undefined) {
     return (
@@ -161,6 +169,7 @@ export function MemoryApp() {
       <div className="flex min-w-0 flex-1 flex-col">
         <AppHeader
           installable={!!installEvt}
+          processingCount={laneCounts.total}
           onInstall={async () => {
             if (!installEvt) return
             await installEvt.prompt()
@@ -177,9 +186,10 @@ export function MemoryApp() {
         </main>
 
         {/* mobile bottom nav */}
-        <BottomNav processingCount={processingCount} />
+        <BottomNav lightCount={laneCounts.light} heavyCount={laneCounts.heavy} />
       </div>
 
+      <QueueSheet />
       <FragmentDetail fragments={fragments} threads={threads} />
       <VoiceRecorder voicePackReady={settings.packs.voice === 'ready'} />
       {ui.settingsOpen && (
